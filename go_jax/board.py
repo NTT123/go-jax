@@ -44,9 +44,8 @@ class GoBoard(pax.Module):
         prev_board = self.board
         is_pass_move = self.board[i, j] == self.turn
         is_invalid_action = self.board[i, j] == -self.turn
-        self.board = self.board.at[i, j].set(self.turn)
+        board = self.board.at[i, j].set(self.turn).reshape((-1,))
         self.turn = -self.turn
-        board = self.board.reshape((-1,))
 
         ## update the dsu
 
@@ -95,12 +94,15 @@ class GoBoard(pax.Module):
         board = jmp.select_tree(board[l2] == opp, remove_stones(board, l2), board)
         board = jmp.select_tree(board[l3] == opp, remove_stones(board, l3), board)
         board = jmp.select_tree(board[l4] == opp, remove_stones(board, l4), board)
+
         # self-capture is not allowed
         board = remove_stones(board, action)
         is_invalid_action = jnp.logical_or(is_invalid_action, board[action] == 0)
+
         # dsu reset for removed stones
         dsu_reset = pax.pure(lambda s, m: (s, s.masked_reset(m))[0])
-        self.dsu = dsu_reset(dsu, board == 0)
+        dsu = dsu_reset(dsu, board == 0)
+
         board = board.reshape(self.board.shape)
         reward = jnp.array(0.0, dtype=jnp.float32)
         done = self.done
@@ -110,12 +112,15 @@ class GoBoard(pax.Module):
         done = jnp.logical_or(done, is_invalid_action)
         two_passes = jnp.logical_and(self.prev_pass_move, is_pass_move)
         done = jnp.logical_or(done, two_passes)
+
+        # update internal states
         self.done = done
         self.board = board
         self.prev_pass_move = is_pass_move
+        self.dsu = dsu
 
         return {
-            "observation": self.board,
+            "observation": board,
             "reward": reward,
             "done": done,
         }
