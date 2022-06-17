@@ -45,7 +45,6 @@ class GoBoard(pax.Module):
         is_pass_move = self.board[i, j] == self.turn
         is_invalid_action = self.board[i, j] == -self.turn
         board = self.board.at[i, j].set(self.turn).reshape((-1,))
-        self.turn = -self.turn
 
         ## update the dsu
 
@@ -114,6 +113,7 @@ class GoBoard(pax.Module):
         done = jnp.logical_or(done, two_passes)
 
         # update internal states
+        self.turn = -self.turn
         self.done = done
         self.board = board
         self.prev_pass_move = is_pass_move
