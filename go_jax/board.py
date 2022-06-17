@@ -1,5 +1,7 @@
 """
 Go board gym-like environment.
+
+Reference: https://github.com/pasky/michi/blob/master/michi.py
 """
 
 
@@ -29,21 +31,20 @@ class GoBoard(pax.Module):
         self.turn = jnp.array(1, dtype=jnp.int32)
         self.dsu = DSU(board_size**2)
         self.done = jnp.array(False, dtype=jnp.bool_)
+        self.is_invalid_action = jnp.array(False, dtype=jnp.bool_)
 
     def step(self, action):
         """One environment step.
 
         This function is similar to OpenAI gym `step` function.
 
-
-        Note on "pass move":
-            - For better performance, we did not treat "pass move" differently.
-            A pass move is just a move that overrides one stone on the board.
+        For "pass move": action = board_size x board_size
         """
         i, j = jnp.divmod(action, self.board_size)
         prev_board = self.board
-        is_pass_move = self.board[i, j] == self.turn
-        is_invalid_action = self.board[i, j] == -self.turn
+        is_pass_move = action == (self.board_size**2)
+        action = jnp.clip(action, a_min=0, a_max=self.board_size**2 - 1)
+        is_invalid_action = self.board[i, j] != 0
         board = self.board.at[i, j].set(self.turn).reshape((-1,))
 
         ## update the dsu
@@ -103,11 +104,17 @@ class GoBoard(pax.Module):
         dsu = dsu_reset(dsu, board == 0)
 
         board = board.reshape(self.board.shape)
-        reward = jnp.array(0.0, dtype=jnp.float32)
-        done = self.done
         same_board = jnp.all(prev_board == board)
         repeat_position = jnp.logical_and(same_board, jnp.logical_not(is_pass_move))
         is_invalid_action = jnp.logical_or(is_invalid_action, repeat_position)
+
+        # reset board and dsu for a pass move
+        board, dsu = jmp.select_tree(is_pass_move, (self.board, self.dsu), (board, dsu))
+        # a pass move is always a valid action
+        is_invalid_action = jnp.where(is_pass_move, False, is_invalid_action)
+
+        # is the game terminated?
+        done = self.done
         done = jnp.logical_or(done, is_invalid_action)
         two_passes = jnp.logical_and(self.prev_pass_move, is_pass_move)
         done = jnp.logical_or(done, two_passes)
@@ -118,10 +125,11 @@ class GoBoard(pax.Module):
         self.board = board
         self.prev_pass_move = is_pass_move
         self.dsu = dsu
+        self.is_invalid_action = is_invalid_action
 
         return {
             "observation": board,
-            "reward": reward,
+            "reward": None,
             "done": done,
         }
 
