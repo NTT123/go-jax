@@ -7,7 +7,6 @@ import chex
 import jax
 import jax.numpy as jnp
 import jmp
-import numpy as np
 import pax
 
 from .dsu import DSU
@@ -70,25 +69,18 @@ class GoBoard(pax.Module):
         dsu, roots = pax.pure(lambda s: (s, s.get_all_roots()))(dsu)
 
         ## kill stones with no liberties
-        def create_filter():
-            # a nearby filter
-            conv = pax.Conv2D(1, 1, 3, padding="SAME")
-            weight = np.zeros((3, 3), dtype=jnp.bool_)
-            weight[1, :] = True
-            weight[:, 1] = True
-            weight[1, 1] = False
-            weight = weight[:, :, None, None]
-            assert weight.shape == conv.weight.shape
-            conv = conv.replace(weight=weight)
 
-            def fn(x):
-                x = x.reshape((self.board_size, self.board_size))
-                x = conv(x[None, :, :, None])
-                return x.reshape((-1,))
-
-            return fn
-
-        nearby_filter = create_filter()
+        def nearby_filter(x):
+            x = x.reshape((self.board_size, self.board_size))
+            padded_x = jnp.pad(x, ((1, 1), (1, 1)))
+            x1 = padded_x[:-2, 1:-1]
+            x2 = padded_x[2:, 1:-1]
+            x3 = padded_x[1:-1, :-2]
+            x4 = padded_x[1:-1, 2:]
+            x12 = jnp.logical_or(x1, x2)
+            x34 = jnp.logical_or(x3, x4)
+            x = jnp.logical_or(x12, x34)
+            return x.reshape((-1,))
 
         def remove_stones(board, loc):
             empty = board == 0
