@@ -21,29 +21,44 @@ class GoBoard(pax.Module):
     """
 
     board_size: int  # size of the board
+    num_recent_positions: int  # number of recent position will be kept
+    komi: float  # added score to white player
+    board: chex.Array  # the current position
+    recent_boards: chex.Array  # a list of recent positions
+    prev_pass_move: chex.Array  # if the previous move is a "pass" move
     turn: chex.Array  # who is playing (1: black, -1: white)
+    dsu: DSU  # a data structure of connected components
+    done: chex.Array  # the game ended
+    count: chex.Array  # number of move played
 
-    def __init__(self, board_size: int = 9):
+    def __init__(
+        self, board_size: int = 5, komi: float = 0.5, num_recent_positions: int = 16
+    ):
         super().__init__()
         self.board_size = board_size
-        self.board = jnp.zeros((board_size, board_size), dtype=jnp.int32)
-        self.prev_pass_move = jnp.array(False, dtype=jnp.bool_)
-        self.turn = jnp.array(1, dtype=jnp.int32)
-        self.dsu = DSU(board_size**2)
-        self.done = jnp.array(False, dtype=jnp.bool_)
-        self.is_invalid_action = jnp.array(False, dtype=jnp.bool_)
+        self.num_recent_positions = num_recent_positions
+        self.komi = komi
+        self.reset()
 
+    def reset(self):
+        """Reset the game"""
+        self.board = jnp.zeros((self.board_size, self.board_size), dtype=jnp.int8)
+        self.recent_boards = jnp.stack([self.board] * self.num_recent_positions)
+        self.prev_pass_move = jnp.array(False, dtype=jnp.bool_)
+        self.turn = jnp.array(1, dtype=jnp.int8)
+        self.dsu = DSU(self.board_size**2)
+        self.done = jnp.array(False, dtype=jnp.bool_)
+        self.count = jnp.array(0, dtype=jnp.int32)
+
+    @pax.pure
     def step(self, action):
         """One environment step.
 
-        This function is similar to OpenAI gym `step` function.
-
-        For "pass move": action = board_size x board_size
+        For "pass" move, action = board_size x board_size
         """
-        i, j = jnp.divmod(action, self.board_size)
-        prev_board = self.board
         is_pass_move = action == (self.board_size**2)
         action = jnp.clip(action, a_min=0, a_max=self.board_size**2 - 1)
+        i, j = jnp.divmod(action, self.board_size)
         is_invalid_action = self.board[i, j] != 0
         board = self.board.at[i, j].set(self.turn).reshape((-1,))
 
@@ -104,7 +119,8 @@ class GoBoard(pax.Module):
         dsu = dsu_reset(dsu, board == 0)
 
         board = board.reshape(self.board.shape)
-        same_board = jnp.all(prev_board == board)
+        recent_boards = self.recent_boards
+        same_board = jnp.any(jnp.all(recent_boards == board[None], axis=(1, 2)))
         repeat_position = jnp.logical_and(same_board, jnp.logical_not(is_pass_move))
         is_invalid_action = jnp.logical_or(is_invalid_action, repeat_position)
 
@@ -118,31 +134,74 @@ class GoBoard(pax.Module):
         done = jnp.logical_or(done, is_invalid_action)
         two_passes = jnp.logical_and(self.prev_pass_move, is_pass_move)
         done = jnp.logical_or(done, two_passes)
+        count = self.count + 1
+        done = jnp.logical_or(done, count >= self.max_num_steps())
 
         # update internal states
-        self.turn = -self.turn
+        game_score = self.final_score(board, self.turn)
+        self.turn = jnp.where(done, self.turn, -self.turn)
         self.done = done
         self.board = board
         self.prev_pass_move = is_pass_move
         self.dsu = dsu
-        self.is_invalid_action = is_invalid_action
+        self.count = count
+        self.recent_boards = jnp.concatenate((recent_boards[1:], board[None]))
 
-        return {
-            "observation": board,
-            "reward": None,
-            "done": done,
-        }
+        reward = jnp.array(0.0)
+        reward = jnp.where(done, jnp.where(game_score > 0, 1.0, -1.0), reward)
+        reward = jnp.where(is_invalid_action, -1.0, reward)
+        return self, reward
+
+    def final_score(self, board, turn):
+        """Compute final score of the game."""
+        my_score = jnp.sum(board == turn, axis=(-1, -2))
+        my_score = my_score + self.count_eyes(board, turn)
+        my_score = my_score - self.turn * self.komi
+        opp_score = jnp.sum(board == -turn, axis=(-1, -2))
+        opp_score = opp_score + self.count_eyes(board, -turn)
+        return my_score - opp_score
+
+    def count_eyes(self, board, turn):
+        """Count number of eyes for a player."""
+        board = board.reshape((self.board_size, self.board_size))
+        padded_board = jnp.pad(board == turn, ((1, 1), (1, 1)), constant_values=True)
+        x1 = padded_board[:-2, 1:-1]
+        x2 = padded_board[2:, 1:-1]
+        x3 = padded_board[1:-1, :-2]
+        x4 = padded_board[1:-1, 2:]
+        x12 = jnp.logical_and(x1, x2)
+        x34 = jnp.logical_and(x3, x4)
+        x = jnp.logical_and(x12, x34)
+        return jnp.sum(x)
+
+    def num_actions(self):
+        return self.board_size**2 + 1
+
+    def max_num_steps(self):
+        return (self.board_size**2) * 2
+
+    def observation(self):
+        return jnp.swapaxes(self.recent_boards, 0, -1)
+
+    def canonical_observation(self):
+        return self.observation() * self.turn
+
+    def is_terminated(self) -> chex.Array:
+        return self.done
 
     def invalid_actions(self):
         """Return invalid actions."""
-        # overriding opponent's stones are invalid actions.
-        return self.board == -self.turn
+        # overriding stones are invalid actions.
+        actions = self.board != 0
+        actions = actions.reshape(actions.shape[:-2] + (-1,))
+        # append "pass" action at the end
+        pad = [(0, 0) for _ in range(len(actions.shape))]
+        pad[-1] = (0, 1)
+        return jnp.pad(actions, pad)
 
     def step_s(self, xy_position: str):
         """A step using string actions."""
-        x_pos = ord(xy_position[0]) - ord("a")
-        y_pos = ord(xy_position[1]) - ord("a")
-        action = x_pos * self.board_size + y_pos
+        action = self.parse_action(xy_position)
         return self.step(action)
 
     def render(self):
@@ -166,20 +225,30 @@ class GoBoard(pax.Module):
                 print(symbol, end=" ")
             print()
 
+    def parse_action(self, action_str: str) -> int:
+        """Parse 2d alphabet actions + "pass" action"""
+        action_str = action_str.lower()
+        if action_str == "pass":
+            return self.board_size * self.board_size
 
-_env_step = jax.jit(pax.pure(lambda e, a: (e, e.step(a))))
+        i = ord(action_str[0]) - ord("a")
+        j = ord(action_str[1]) - ord("a")
+        return i * self.board_size + j
+
+
+_env_step = jax.jit(pax.pure(lambda e, a: e.step(a)))
 
 
 def put_stone(env, action):
-    i = ord(action[0]) - ord("a")
-    j = ord(action[1]) - ord("a")
-    action = i * env.board_size + j
+    """put a stone on the boar"""
+    action = env.parse_action(action)
+    action = jnp.array(action, dtype=jnp.int32)
     return _env_step(env, action)
 
 
 if __name__ == "__main__":
     game = GoBoard(9)
-    while game.done.item() == False:
+    while game.done.item() is False:
         game.render()
         user_action = input("> ")
         game, _ = put_stone(game, user_action)
