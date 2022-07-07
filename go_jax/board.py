@@ -1,20 +1,25 @@
 """
 Go board gym-like environment.
 
-Reference: https://github.com/pasky/michi/blob/master/michi.py
-"""
+Reference: https://github.com/pasky/michi/blob/master/michi.py.
 
+We implement Tromp-Taylor scoring rule.
+For better performance, we only count eyes and player stones.
+Players need to fill the whole board.
+"""
 
 import chex
 import jax
 import jax.numpy as jnp
-import jmp
+import numpy as np
 import pax
 
 from .dsu import DSU
+from .env import Enviroment
+from .utils import select_tree
 
 
-class GoBoard(pax.Module):
+class GoBoard(Enviroment):
     """A jax-based go engine.
 
     It provides a gym-like API.
@@ -32,7 +37,7 @@ class GoBoard(pax.Module):
     count: chex.Array  # number of move played
 
     def __init__(
-        self, board_size: int = 5, komi: float = 0.5, num_recent_positions: int = 16
+        self, board_size: int = 5, komi: float = 0.5, num_recent_positions: int = 8
     ):
         super().__init__()
         self.board_size = board_size
@@ -41,7 +46,6 @@ class GoBoard(pax.Module):
         self.reset()
 
     def reset(self):
-        """Reset the game"""
         self.board = jnp.zeros((self.board_size, self.board_size), dtype=jnp.int8)
         self.recent_boards = jnp.stack([self.board] * self.num_recent_positions)
         self.prev_pass_move = jnp.array(False, dtype=jnp.bool_)
@@ -66,7 +70,7 @@ class GoBoard(pax.Module):
 
         def update_dsu(s, loc):
             update = pax.pure(lambda s: (s, s.union_sets(action, loc))[0])
-            return jmp.select_tree(board[action] == board[loc], update(s), s)
+            return select_tree(board[action] == board[loc], update(s), s)
 
         def board_clip(x):
             return jnp.clip(x, a_min=0, a_max=self.board_size - 1)
@@ -105,10 +109,10 @@ class GoBoard(pax.Module):
             return jnp.where(alive, board, cleared_board)
 
         opp = -board[action]
-        board = jmp.select_tree(board[l1] == opp, remove_stones(board, l1), board)
-        board = jmp.select_tree(board[l2] == opp, remove_stones(board, l2), board)
-        board = jmp.select_tree(board[l3] == opp, remove_stones(board, l3), board)
-        board = jmp.select_tree(board[l4] == opp, remove_stones(board, l4), board)
+        board = select_tree(board[l1] == opp, remove_stones(board, l1), board)
+        board = select_tree(board[l2] == opp, remove_stones(board, l2), board)
+        board = select_tree(board[l3] == opp, remove_stones(board, l3), board)
+        board = select_tree(board[l4] == opp, remove_stones(board, l4), board)
 
         # self-capture is not allowed
         board = remove_stones(board, action)
@@ -125,7 +129,7 @@ class GoBoard(pax.Module):
         is_invalid_action = jnp.logical_or(is_invalid_action, repeat_position)
 
         # reset board and dsu for a pass move
-        board, dsu = jmp.select_tree(is_pass_move, (self.board, self.dsu), (board, dsu))
+        board, dsu = select_tree(is_pass_move, (self.board, self.dsu), (board, dsu))
         # a pass move is always a valid action
         is_invalid_action = jnp.where(is_pass_move, False, is_invalid_action)
 
@@ -150,13 +154,13 @@ class GoBoard(pax.Module):
         reward = jnp.array(0.0)
         reward = jnp.where(done, jnp.where(game_score > 0, 1.0, -1.0), reward)
         reward = jnp.where(is_invalid_action, -1.0, reward)
-        return self, reward
+        return self, reward, self.is_terminated(), {}
 
     def final_score(self, board, turn):
         """Compute final score of the game."""
         my_score = jnp.sum(board == turn, axis=(-1, -2))
         my_score = my_score + self.count_eyes(board, turn)
-        my_score = my_score - self.turn * self.komi
+        my_score = my_score - turn * self.komi
         opp_score = jnp.sum(board == -turn, axis=(-1, -2))
         opp_score = opp_score + self.count_eyes(board, -turn)
         return my_score - opp_score
@@ -171,7 +175,8 @@ class GoBoard(pax.Module):
         x4 = padded_board[1:-1, 2:]
         x12 = jnp.logical_and(x1, x2)
         x34 = jnp.logical_and(x3, x4)
-        x = jnp.logical_and(x12, x34)
+        x1234 = jnp.logical_and(x12, x34)
+        x = jnp.logical_and(x1234, board == 0)
         return jnp.sum(x)
 
     def num_actions(self):
@@ -181,7 +186,9 @@ class GoBoard(pax.Module):
         return (self.board_size**2) * 2
 
     def observation(self):
-        return jnp.swapaxes(self.recent_boards, 0, -1)
+        turn = jnp.ones_like(self.board)[None]
+        board = jnp.concatenate((self.recent_boards, turn))
+        return jnp.moveaxis(board, 0, -1)
 
     def canonical_observation(self):
         return self.observation() * self.turn
@@ -227,13 +234,34 @@ class GoBoard(pax.Module):
 
     def parse_action(self, action_str: str) -> int:
         """Parse 2d alphabet actions + "pass" action"""
-        action_str = action_str.lower()
+        action_str = action_str.lower().replace(" ", "")
         if action_str == "pass":
-            return self.board_size * self.board_size
+            return self.board_size**2
 
         i = ord(action_str[0]) - ord("a")
         j = ord(action_str[1]) - ord("a")
         return i * self.board_size + j
+
+    def symmetries(self, state, action_weights):
+        N = self.board_size
+        action_no_pass = action_weights[:-1].reshape((N, N))
+        pass_move = action_weights[-1:]
+        out = []
+        for rotate in range(4):
+            rotated_state = np.rot90(state, rotate, axes=(0, 1))
+            rotated_action = np.rot90(action_no_pass, rotate, axes=(0, 1))
+            rotated_action_pass = np.concatenate(
+                (rotated_action.reshape((-1,)), pass_move)
+            )
+            out.append((rotated_state, rotated_action_pass))
+
+            flipped_state = np.fliplr(rotated_state)
+            flipped_action = np.fliplr(rotated_action)
+            flipped_action_pass = np.concatenate(
+                (flipped_action.reshape((-1,)), pass_move)
+            )
+            out.append((flipped_state, flipped_action_pass))
+        return out
 
 
 _env_step = jax.jit(pax.pure(lambda e, a: e.step(a)))
