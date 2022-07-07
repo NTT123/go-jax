@@ -2,7 +2,7 @@
 Enviroment base class.
 """
 
-from typing import Any, Tuple, TypeVar
+from typing import Any, TypeVar
 
 import chex
 import pax

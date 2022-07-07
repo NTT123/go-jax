@@ -1,4 +1,4 @@
-# go-jax (work-in-progress)
+# go-jax
 Go game engine in JAX.
 
 ```sh
@@ -9,12 +9,11 @@ Usage:
 
 ```python
 >>> import pax
->>> from go_jax import GoBoard
+>>> from go_jax import GoBoard, put_stone
 >>> 
 >>> game = GoBoard(board_size=9)
->>> put_stone = pax.pure(lambda e, a: (e, e.step_s(a)))
->>> game, _ = put_stone(game, "ef")
->>> game, _ = put_stone(game, "ed")
+>>> game, *_ = put_stone(game, "ef")
+>>> game, *_ = put_stone(game, "ed")
 >>> game.render()
   a b c d e f g h i 
 a . . . . . . . . . 
@@ -25,5 +24,5 @@ e . . . O . X . . .
 f . . . . . . . . . 
 g . . . . . . . . . 
 h . . . . . . . . . 
-i . . . . . . . . .
+i . . . . . . . . . 
 ```
