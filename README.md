@@ -8,7 +8,6 @@ pip install git+https://github.com/NTT123/go-jax.git
 Usage:
 
 ```python
->>> import pax
 >>> from go_jax import GoBoard, put_stone
 >>> 
 >>> game = GoBoard(board_size=9)
